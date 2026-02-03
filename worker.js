@@ -1,9 +1,10 @@
 /**
- * Cloudflare Worker 多项目部署管理器 (V7.5 Full Expanded)
+ * Cloudflare Worker 多项目部署管理器 (V7.5.1 ProxyIP Fixed)
  * * 版本特性：
- * 1. [收藏夹] 支持将特定版本加入收藏，永久置顶。
- * 2. [动态历史] 支持前端自定义获取历史版本的数量 (Limit)。
- * 3. [完全展开] 代码无任何压缩，逻辑清晰可见。
+ * 1. [修复] 补全了丢失的 ProxyIP 列表 (欧洲/北美/亚洲全量)。
+ * 2. [收藏夹] 支持将特定版本加入收藏，永久置顶。
+ * 3. [动态历史] 支持前端自定义获取历史版本的数量 (Limit)。
+ * 4. [完全展开] 代码无任何压缩，逻辑清晰可见。
  */
 
 // ==========================================
@@ -110,7 +111,7 @@ const TEMPLATES = {
           return new Response(stored || JSON.stringify(defaultCfg), { headers: { "Content-Type": "application/json" } });
       }
       
-      // [新增] API: 收藏夹管理
+      // API: 收藏夹管理
       if (url.pathname === "/api/favorites") {
           const type = url.searchParams.get("type");
           const key = `FAVORITES_${type}`;
@@ -124,7 +125,6 @@ const TEMPLATES = {
               let favs = JSON.parse(await env.CONFIG_KV.get(key) || "[]");
               
               if (action === 'add') {
-                  // 避免重复添加
                   if (!favs.find(f => f.sha === item.sha)) {
                       favs.unshift(item); // 添加到头部
                   }
@@ -145,7 +145,7 @@ const TEMPLATES = {
         if (request.method === "POST") {
             const body = await request.json();
             const oldCfg = JSON.parse(await env.CONFIG_KV.get(GLOBAL_CONFIG_KEY) || "{}");
-            // 保留上次检查时间，避免被重置
+            // 保留上次检查时间
             body.lastCheck = oldCfg.lastCheck || 0; 
             await env.CONFIG_KV.put(GLOBAL_CONFIG_KEY, JSON.stringify(body));
             return new Response(JSON.stringify({ success: true }));
@@ -156,7 +156,7 @@ const TEMPLATES = {
       if (url.pathname === "/api/check_update") {
           const type = url.searchParams.get("type");
           const mode = url.searchParams.get("mode"); // 'latest' or 'history'
-          const limit = url.searchParams.get("limit") || 10; // [新增] 获取数量
+          const limit = url.searchParams.get("limit") || 10;
           return await handleCheckUpdate(env, type, mode, limit);
       }
   
@@ -194,22 +194,20 @@ const TEMPLATES = {
   
   // ================= 辅助函数区 =================
   
-  // 构造 GitHub URL (API 或 Raw)
+  // 构造 GitHub URL
   function getGithubUrls(type, sha = null) {
       const t = TEMPLATES[type];
       const safePath = t.ghPath.split('/').map(p => encodeURIComponent(p)).join('/');
-      
       const apiUrl = `https://api.github.com/repos/${t.ghUser}/${t.ghRepo}/commits`;
       
-      // 如果没有 SHA，默认使用 Branch (Latest)
-      // 如果有 SHA，使用 SHA (Fixed)
+      // 这里的 ref：如果没有传入 SHA，则使用分支名(Latest)；如果有 SHA，则使用 SHA(Fixed)
       const ref = sha || t.ghBranch;
       const scriptUrl = `https://raw.githubusercontent.com/${t.ghUser}/${t.ghRepo}/${ref}/${safePath}`;
       
       return { apiUrl, scriptUrl, branch: t.ghBranch };
   }
 
-  // Cron 任务 (核心：熔断时遵守版本锁定)
+  // Cron 任务 (熔断时遵守版本锁定)
   async function handleCronJob(env) {
       const ACCOUNTS_KEY = `ACCOUNTS_UNIFIED_STORAGE`;
       const GLOBAL_CONFIG_KEY = `AUTO_UPDATE_CFG_GLOBAL`;
@@ -253,7 +251,6 @@ const TEMPLATES = {
       }
   
       // === 自动更新逻辑 ===
-      // 只有在没有触发熔断时才检查更新
       if (!actionTaken) {
           await Promise.all([
               checkAndDeployUpdate(env, 'cmliu', accounts, ACCOUNTS_KEY),
@@ -265,14 +262,13 @@ const TEMPLATES = {
       await env.CONFIG_KV.put(GLOBAL_CONFIG_KEY, JSON.stringify(config));
   }
   
-  // 检查并部署更新 (自动更新模式)
+  // 检查并部署更新
   async function checkAndDeployUpdate(env, type, accounts, accountsKey) {
       try {
-          // 如果处于锁定模式，则跳过
           const deployConfigKey = `DEPLOY_CONFIG_${type}`;
           const deployConfig = JSON.parse(await env.CONFIG_KV.get(deployConfigKey) || '{"mode":"latest"}');
-          if (deployConfig.mode === 'fixed') return; 
-
+          if (deployConfig.mode === 'fixed') return; // 锁定模式不更新
+  
           const VERSION_KEY = `VERSION_INFO_${type}`;
           const res = await handleCheckUpdate(env, type, 'latest');
           const checkData = await res.json();
@@ -304,7 +300,7 @@ const TEMPLATES = {
       if (!uuidUpdated) variables.push({ key: uuidField, value: crypto.randomUUID() });
       await env.CONFIG_KV.put(VARS_KEY, JSON.stringify(variables));
   
-      // 2. 获取当前部署策略 (决定使用哪个版本的代码)
+      // 2. 获取当前部署策略
       const deployConfigKey = `DEPLOY_CONFIG_${type}`;
       const deployConfig = JSON.parse(await env.CONFIG_KV.get(deployConfigKey) || '{"mode":"latest"}');
       const targetSha = deployConfig.mode === 'fixed' ? deployConfig.currentSha : 'latest';
@@ -313,7 +309,7 @@ const TEMPLATES = {
       await coreDeployLogic(env, type, variables, [], accountsKey, targetSha);
   }
   
-  // 检查更新接口 (支持 Limit)
+  // 检查更新接口
   async function handleCheckUpdate(env, type, mode, limit = 10) {
       try {
           const VERSION_KEY = `VERSION_INFO_${type}`;
@@ -349,13 +345,12 @@ const TEMPLATES = {
   
   // 手动部署入口
   async function handleManualDeploy(env, type, variables, deletedVariables, accountsKey, targetSha) {
-      // 'latest' 字符串转为 null，以便 coreDeployLogic 识别
       const actualSha = (targetSha === 'latest' || targetSha === '') ? null : targetSha;
       const result = await coreDeployLogic(env, type, variables, deletedVariables, accountsKey, actualSha);
       return new Response(JSON.stringify(result), { headers: { "Content-Type": "application/json" } });
   }
 
-  // 核心部署逻辑 (完全体)
+  // 核心部署逻辑
   async function coreDeployLogic(env, type, variables, deletedVariables, accountsKey, targetSha) {
       try {
           const accounts = JSON.parse(await env.CONFIG_KV.get(accountsKey) || "[]");
@@ -372,7 +367,7 @@ const TEMPLATES = {
               if (!codeRes.ok) throw new Error(`代码下载失败: ${codeRes.status}`);
               githubScriptContent = await codeRes.text();
               
-              // 3. 如果是 Latest，需要补全 SHA 信息以便记录
+              // 3. 补全 SHA
               if (!deployedSha) {
                   const headers = { "User-Agent": "CF-Worker" };
                   if (env.GITHUB_TOKEN) headers["Authorization"] = `token ${env.GITHUB_TOKEN}`;
@@ -384,7 +379,7 @@ const TEMPLATES = {
               }
           } catch (e) { return [{ name: "网络错误", success: false, msg: e.message }]; }
   
-          // 4. 代码注入/预处理
+          // 4. 代码预处理
           if (type === 'joey') githubScriptContent = 'var window = globalThis;\n' + githubScriptContent;
           if (type === 'ech') {
              const proxyVar = variables ? variables.find(v => v.key === 'PROXYIP') : null;
@@ -396,7 +391,7 @@ const TEMPLATES = {
           const logs = [];
           let updateCount = 0;
           
-          // 5. 遍历账号部署
+          // 5. 遍历部署
           for (const acc of accounts) {
             const targetWorkers = acc[`workers_${type}`] || [];
             for (const wName of targetWorkers) {
@@ -436,7 +431,7 @@ const TEMPLATES = {
             } 
           }
   
-          // 6. 保存状态 (版本信息 + 锁定状态)
+          // 6. 保存状态
           if (updateCount > 0 && deployedSha) {
               const VERSION_KEY = `VERSION_INFO_${type}`;
               await env.CONFIG_KV.put(VERSION_KEY, JSON.stringify({ sha: deployedSha, deployDate: new Date().toISOString() }));
@@ -498,11 +493,8 @@ const TEMPLATES = {
       } catch(e) { return new Response(JSON.stringify({ success: false, msg: e.message }), { status: 500 }); }
   }
 
-  // 删除绑定 (为了简化，复用部署逻辑)
   async function handleDeleteBinding(env, {accountId, apiToken, workerName, key, type}) {
-      // 这里的逻辑可以优化为只调用 Cloudflare API 删除，但为了保证代码一致性，建议重新部署
-      // 暂时返回一个简单的信号，前端会重新触发部署逻辑
-      return new Response(JSON.stringify({ success: false, msg: "建议使用完整部署流程更新" }), { status: 200 }); 
+      return new Response(JSON.stringify({ success: false, msg: "请使用完整部署流程更新变量" }), { status: 200 }); 
   }
   
   function loginHtml() { return `<!DOCTYPE html><html><body style="display:flex;justify-content:center;align-items:center;height:100vh;background:#f3f4f6"><form method="GET"><input type="password" name="code" placeholder="密码" style="padding:10px"><button style="padding:10px">登录</button></form></body></html>`; }
@@ -518,7 +510,7 @@ const TEMPLATES = {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="manifest" href="/manifest.json">
-    <title>Worker 智能中控 (V7.5 Full)</title>
+    <title>Worker 智能中控 (V7.5.1)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
       .input-field { border: 1px solid #cbd5e1; padding: 0.25rem 0.5rem; width:100%; border-radius: 4px; font-size: 0.8rem; } 
@@ -536,8 +528,8 @@ const TEMPLATES = {
       
       <header class="bg-white px-4 py-3 md:px-6 md:py-4 rounded shadow flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
           <div class="flex-none">
-              <h1 class="text-xl font-bold text-slate-800 flex items-center gap-2">🚀 Worker 部署中控 <span class="text-xs bg-purple-600 text-white px-2 py-0.5 rounded ml-2">V7.5</span></h1>
-              <div class="text-[10px] text-gray-400 mt-1">全局管理 · 收藏夹 · 动态历史深度</div>
+              <h1 class="text-xl font-bold text-slate-800 flex items-center gap-2">🚀 Worker 部署中控 <span class="text-xs bg-purple-600 text-white px-2 py-0.5 rounded ml-2">V7.5.1</span></h1>
+              <div class="text-[10px] text-gray-400 mt-1">全局管理 · 收藏夹 · 动态历史 · 全量代理</div>
           </div>
           <div id="logs" class="bg-slate-900 text-green-400 p-2 rounded text-xs font-mono hidden max-h-[80px] lg:max-h-[50px] overflow-y-auto shadow-inner w-full lg:flex-1 lg:mx-4 order-2 lg:order-none"></div>
           
@@ -735,8 +727,30 @@ const TEMPLATES = {
         'joey': { defaultVars: ["u", "d", "p"], uuidField: "u", name: "Joey" }, 
         'ech': { defaultVars: ["PROXYIP"], uuidField: "", name: "ECH" } 
       };
-      const DOH_PRESETS = ["https://dns.jhb.ovh/joeyblog","https://doh.cmliussss.com/CMLiussss","cloudflare-ech.com"];
-      const ECH_PROXIES = [{group:"Global", list:["ProxyIP.CMLiussss.net"]}, {group:"Asia", list:["ProxyIP.HK.CMLiussss.net (HK)","ProxyIP.SG.CMLiussss.net (SG)","ProxyIP.JP.CMLiussss.net (JP)"]}];
+      
+      const DOH_PRESETS = [
+          "https://dns.jhb.ovh/joeyblog",
+          "https://doh.cmliussss.com/CMLiussss",
+          "cloudflare-ech.com"
+      ];
+      
+      // [修复] 完整的 ECH ProxyIP 列表
+      const ECH_PROXIES = [
+          {group:"全球 Global", list:["ProxyIP.CMLiussss.net"]},
+          {group:"亚洲 Asia", list:[
+              "ProxyIP.HK.CMLiussss.net (香港)", "ProxyIP.SG.CMLiussss.net (新加坡)", 
+              "ProxyIP.JP.CMLiussss.net (日本)", "ProxyIP.KR.CMLiussss.net (韩国)", "ProxyIP.IN.CMLiussss.net (印度)"
+          ]},
+          {group:"欧洲 Europe", list:[
+              "ProxyIP.GB.CMLiussss.net (英国)", "ProxyIP.FR.CMLiussss.net (法国)", "ProxyIP.DE.CMLiussss.net (德国)", 
+              "ProxyIP.NL.CMLiussss.net (荷兰)", "ProxyIP.SE.CMLiussss.net (瑞典)", "ProxyIP.FI.CMLiussss.net (芬兰)",
+              "ProxyIP.PL.CMLiussss.net (波兰)", "ProxyIP.RU.CMLiussss.net (俄罗斯)", "ProxyIP.CH.CMLiussss.net (瑞士)",
+              "ProxyIP.LV.CMLiussss.net (拉脱维亚)"
+          ]},
+          {group:"北美 North America", list:[
+              "ProxyIP.US.CMLiussss.net (美国)", "ProxyIP.CA.CMLiussss.net (加拿大)"
+          ]}
+      ];
   
       // ================= 全局变量 =================
       let accounts = [];
